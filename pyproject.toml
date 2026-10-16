@@ -71,14 +71,15 @@ aws = ["boto3==1.42.37"]
 oci = ["oci==2.166.0"]
 video = ["imageio[ffmpeg]==2.37.2", "numpy==2.4.1"]
 examples = [
-    "agentmail==0.0.59",
+	"agentmail==0.0.59",
     # botocore: only needed for Bedrock Claude boto3 examples/models/bedrock_claude.py
     "botocore==1.42.37",
     "imgcat==0.6.0",
     # "stagehand-py>=0.3.6",
     # "browserbase>=0.4.0",
-    "langchain-openai==1.1.14",
+	"langchain-openai==1.1.14",
 ]
+ui = ["gradio>=6,<7"]
 eval = [
     "lmnr[all]==0.7.42",
     "anyio==4.12.1",
