@@ -4,7 +4,7 @@ Tests for multi_act() page-change guards.
 Verifies:
 1. Metadata: terminates_sequence flags are set correctly on built-in actions
 2. Static guard: actions tagged terminates_sequence abort remaining queued actions
-3. Runtime guard: URL/focus changes detected after click-on-link abort remaining actions
+3. Runtime guard: URL/focus/DOM changes abort remaining actions
 4. Safe chain: multiple inputs execute without interruption
 
 Usage:
@@ -12,11 +12,14 @@ Usage:
 """
 
 import asyncio
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pytest_httpserver import HTTPServer
 
 from browser_use.agent.service import Agent
+from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from browser_use.browser.profile import BrowserProfile
 from browser_use.tools.service import Tools
@@ -217,7 +220,7 @@ class TestStaticGuard:
 
 
 class TestRuntimeGuard:
-	"""Verify that URL/focus changes detected at runtime abort remaining actions."""
+	"""Verify that URL, focus, and DOM changes detected at runtime abort remaining actions."""
 
 	async def test_click_link_aborts_remaining(self, browser_session, base_url, tools):
 		"""Click a link that navigates to another page — remaining actions skipped."""
@@ -256,6 +259,67 @@ class TestRuntimeGuard:
 		# Verify we're on page_b
 		url = await browser_session.get_current_page_url()
 		assert '/page_b' in url
+
+	@pytest.mark.parametrize(
+		('changed_field', 'new_value', 'expected_actions'),
+		[
+			(None, None, ['click', 'scroll']),
+			('target_id', 'target-2', ['click']),
+			('frame_id', 'frame-2', ['click']),
+			('session_id', 'session-2', ['click']),
+			('backend_node_id', 2, ['click']),
+		],
+	)
+	async def test_same_url_dom_identity_guard(self, tools, monkeypatch, changed_field, new_value, expected_actions):
+		"""Only continue queued actions when each selector still identifies the same node."""
+		old_identity = {
+			'target_id': 'target-1',
+			'frame_id': 'frame-1',
+			'session_id': 'session-1',
+			'backend_node_id': 1,
+		}
+		new_identity = dict(old_identity)
+		if changed_field:
+			new_identity[changed_field] = new_value
+		old_node = SimpleNamespace(**old_identity)
+		new_node = SimpleNamespace(**new_identity)
+		browser_session = SimpleNamespace(
+			id='session-1',
+			browser_profile=BrowserProfile(wait_between_actions=0),
+			agent_focus_target_id='target-1',
+			_cached_browser_state_summary=SimpleNamespace(dom_state=SimpleNamespace(selector_map={1: old_node})),
+		)
+
+		async def get_current_page_url():
+			return 'https://example.test'
+
+		browser_session.get_current_page_url = get_current_page_url
+		state_captures = []
+
+		async def get_browser_state_summary(include_screenshot=True, cached=False, include_recent_events=False):
+			state_captures.append(include_screenshot)
+			return SimpleNamespace(dom_state=SimpleNamespace(selector_map={1: new_node}), state_error=None)
+
+		browser_session.get_browser_state_summary = get_browser_state_summary
+		agent = Agent(task='test', llm=create_mock_llm(), browser_session=cast(BrowserSession, browser_session), tools=tools)
+		executed_actions = []
+
+		async def act(action, **kwargs):
+			executed_actions.append(next(iter(action.model_dump(exclude_unset=True))))
+			return ActionResult()
+
+		monkeypatch.setattr(tools, 'act', act)
+		ActionModel = tools.registry.create_action_model()
+		actions = [
+			ActionModel.model_validate({'click': {'index': 1}}),
+			ActionModel.model_validate({'scroll': {'down': True, 'pages': 1}}),
+		]
+
+		results = await agent.multi_act(actions)
+
+		assert executed_actions == expected_actions
+		assert len(results) == len(expected_actions)
+		assert state_captures == [False]
 
 
 # ---------------------------------------------------------------------------
