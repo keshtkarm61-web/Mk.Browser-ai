@@ -2734,7 +2734,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		  1. Static flag: actions tagged with terminates_sequence=True (navigate, search, go_back, switch)
 		     automatically abort remaining queued actions.
 		  2. Runtime detection: after every action, the current URL and focused target are compared
-		     to pre-action values. Any change aborts the remaining queue.
+		     to pre-action values, and the selector map is refreshed to detect same-URL DOM changes.
 		"""
 		results: list[ActionResult] = []
 		total_actions = len(actions)
@@ -2826,6 +2826,50 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if post_action_url != pre_action_url or post_action_focus != pre_action_focus:
 					self.logger.info(f'Page changed after "{action_name}" — skipping {total_actions - i - 1} remaining action(s)')
 					break
+
+				# A click, scroll, or input can replace/reorder elements without changing
+				# the URL. Refresh indices before using any remaining queued actions.
+				if cached_selector_map:
+					try:
+						current_state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+					except Exception as e:
+						if self._is_connection_like_error(e):
+							raise
+						self.logger.warning(f'Could not verify DOM after "{action_name}": {e}; skipping remaining actions')
+						break
+
+					if current_state.state_error:
+						self.logger.info(
+							f'DOM unavailable after "{action_name}" — skipping {total_actions - i - 1} remaining action(s)'
+						)
+						break
+
+					current_selector_map = current_state.dom_state.selector_map
+					selector_map_changed = cached_selector_map.keys() != current_selector_map.keys()
+					if not selector_map_changed:
+						selector_map_changed = any(
+							(
+								cached_selector_map[index].target_id,
+								cached_selector_map[index].frame_id,
+								cached_selector_map[index].session_id,
+								cached_selector_map[index].backend_node_id,
+							)
+							!= (
+								current_selector_map[index].target_id,
+								current_selector_map[index].frame_id,
+								current_selector_map[index].session_id,
+								current_selector_map[index].backend_node_id,
+							)
+							for index in cached_selector_map
+						)
+
+					if selector_map_changed:
+						self.logger.info(
+							f'DOM changed after "{action_name}" — skipping {total_actions - i - 1} remaining action(s)'
+						)
+						break
+
+					cached_selector_map = dict(current_selector_map)
 
 			except Exception as e:
 				# Re-raise InterruptedError so _check_stop_or_pause's stop/pause signal still propagates
